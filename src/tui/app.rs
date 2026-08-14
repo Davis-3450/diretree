@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::cli::report::top_entries;
 use crate::scan::{FileKind, Tree};
@@ -49,6 +49,9 @@ struct App {
     top_inner: Rect,
     footer_area: Rect,
     back_area: Rect,
+    // list state (for scroll-offset-aware mouse hit-testing)
+    tree_state: ListState,
+    top_state: ListState,
     // double-click tracking
     last_click: Option<(u16, u16, Instant)>,
 }
@@ -61,7 +64,7 @@ impl App {
             tree,
             tab: Tab::Treemap,
             focus: 0,
-            selected: Some(0),
+            selected: None,
             hovered: None,
             expanded,
             tree_cursor: 0,
@@ -71,6 +74,8 @@ impl App {
             top_inner: Rect::default(),
             footer_area: Rect::default(),
             back_area: Rect::default(),
+            tree_state: ListState::default(),
+            top_state: ListState::default(),
             last_click: None,
         }
     }
@@ -313,11 +318,8 @@ impl App {
             .highlight_style(theme.highlight_style())
             .highlight_symbol("▍ ");
         let inner = area;
-        f.render_stateful_widget(
-            list,
-            area,
-            &mut ratatui::widgets::ListState::default().with_selected(Some(self.tree_cursor)),
-        );
+        self.tree_state.select(Some(self.tree_cursor));
+        f.render_stateful_widget(list, area, &mut self.tree_state);
         self.tree_inner = Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -373,11 +375,8 @@ impl App {
             .block(block)
             .highlight_style(theme.highlight_style())
             .highlight_symbol("▍ ");
-        f.render_stateful_widget(
-            list,
-            area,
-            &mut ratatui::widgets::ListState::default().with_selected(Some(self.top_cursor)),
-        );
+        self.top_state.select(Some(self.top_cursor));
+        f.render_stateful_widget(list, area, &mut self.top_state);
         self.top_inner = Rect {
             x: area.x + 1,
             y: area.y + 1,
@@ -443,8 +442,8 @@ impl App {
         let (col, row) = (m.column.saturating_sub(1), m.row.saturating_sub(1));
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // back button (treemap status line)
-                if self.tab == Tab::Treemap && self.back_area.contains(Position::new(col, row)) {
+                // back button
+                if self.can_back() && self.back_area.contains(Position::new(col, row)) {
                     self.go_up();
                     return;
                 }
@@ -454,12 +453,15 @@ impl App {
                     match self.footer_text().chars().nth(i) {
                         Some('1') => {
                             self.tab = Tab::Treemap;
+                            self.hovered = None;
                         }
                         Some('2') => {
                             self.tab = Tab::Tree;
+                            self.hovered = None;
                         }
                         Some('3') => {
                             self.tab = Tab::Top;
+                            self.hovered = None;
                         }
                         _ => {}
                     }
@@ -494,6 +496,7 @@ impl App {
                                     if n.kind == FileKind::Dir && self.tree.has_children(idx) {
                                         self.focus = idx;
                                         self.selected = None;
+                                        self.hovered = None;
                                     }
                                 }
                             }
@@ -501,19 +504,19 @@ impl App {
                     }
                     Tab::Tree => {
                         if self.tree_inner.contains(Position::new(col, row)) {
-                            let r = (row - self.tree_inner.y) as usize;
+                            let idx = (row - self.tree_inner.y) as usize + self.tree_state.offset();
                             let v = self.visible_nodes();
-                            if r < v.len() {
-                                self.tree_cursor = r;
+                            if idx < v.len() {
+                                self.tree_cursor = idx;
                             }
                         }
                     }
                     Tab::Top => {
                         if self.top_inner.contains(Position::new(col, row)) {
-                            let r = (row - self.top_inner.y) as usize;
+                            let idx = (row - self.top_inner.y) as usize + self.top_state.offset();
                             let e = top_entries(&self.tree, 100, 0);
-                            if r < e.len() {
-                                self.top_cursor = r;
+                            if idx < e.len() {
+                                self.top_cursor = idx;
                             }
                         }
                     }
@@ -563,7 +566,11 @@ impl App {
             return Ok(true);
         }
         match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => Ok(true),
+            KeyCode::Char('q') => Ok(true),
+            KeyCode::Esc => {
+                self.go_up();
+                Ok(false)
+            }
             KeyCode::Char('1') => self.switch(Tab::Treemap),
             KeyCode::Char('2') => self.switch(Tab::Tree),
             KeyCode::Char('3') => self.switch(Tab::Top),
