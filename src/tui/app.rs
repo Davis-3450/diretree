@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::cli::report::top_entries;
-use crate::scan::{FileKind, Tree};
+use crate::scan::{FileKind, ScanConfig, Tree};
 use crate::tui::theme::Theme;
 use crate::units::human_bytes;
 
@@ -33,6 +33,8 @@ enum Tab {
 
 struct App {
     tree: Tree,
+    cfg: ScanConfig,
+    refresh_error: Option<String>,
     tab: Tab,
     // treemap
     focus: usize,
@@ -57,11 +59,13 @@ struct App {
 }
 
 impl App {
-    fn new(tree: Tree) -> Self {
+    fn new(tree: Tree, cfg: ScanConfig) -> Self {
         let mut expanded = HashSet::new();
         expanded.insert(tree.root());
         Self {
             tree,
+            cfg,
+            refresh_error: None,
             tab: Tab::Treemap,
             focus: 0,
             selected: None,
@@ -169,11 +173,15 @@ impl App {
 
     fn footer_text(&self) -> String {
         let help = match self.tab {
-            Tab::Treemap => "  ⏎/dbl drill  u up  ←→ select  o open  q quit ",
-            Tab::Tree => "  j/k move  l enter  h collapse  o open  q quit ",
-            Tab::Top => "  j/k move  ⏎ open  o open  q quit ",
+            Tab::Treemap => "  ⏎/dbl drill  u up  ←→ select  o open  r refresh  q quit ",
+            Tab::Tree => "  j/k move  l enter  h collapse  o open  r refresh  q quit ",
+            Tab::Top => "  j/k move  ⏎ open  o open  r refresh  q quit ",
         };
-        format!(" [1] treemap  [2] tree  [3] top   {help}")
+        let mut text = format!(" [1] treemap  [2] tree  [3] top   {help}");
+        if let Some(err) = &self.refresh_error {
+            text = format!("⚠ refresh failed: {err}");
+        }
+        text
     }
 
     fn draw_footer(&self, f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
@@ -575,6 +583,10 @@ impl App {
             KeyCode::Char('2') => self.switch(Tab::Tree),
             KeyCode::Char('3') => self.switch(Tab::Top),
             KeyCode::Char('o') => self.open_selected(),
+            KeyCode::Char('r') | KeyCode::F(5) => {
+                self.refresh();
+                Ok(false)
+            }
             KeyCode::Char('u') | KeyCode::Backspace => {
                 self.go_up();
                 Ok(false)
@@ -584,6 +596,27 @@ impl App {
                 Tab::Tree => self.tree_key(other),
                 Tab::Top => self.top_key(other),
             },
+        }
+    }
+
+    fn refresh(&mut self) {
+        let path = self.tree.node(self.tree.root()).path.clone();
+        match crate::scan::scan_tree(&path, self.cfg) {
+            Ok(new_tree) => {
+                self.tree = new_tree;
+                self.refresh_error = None;
+                let mut expanded = HashSet::new();
+                expanded.insert(self.tree.root());
+                self.expanded = expanded;
+                self.focus = 0;
+                self.selected = None;
+                self.hovered = None;
+                self.tree_cursor = 0;
+                self.top_cursor = 0;
+                self.tree_state = ListState::default();
+                self.top_state = ListState::default();
+            }
+            Err(e) => self.refresh_error = Some(e.to_string()),
         }
     }
 
@@ -716,14 +749,14 @@ impl App {
     }
 }
 
-pub fn run(tree: Tree) -> Result<(), Box<dyn Error>> {
+pub fn run(tree: Tree, cfg: ScanConfig) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(tree);
+    let mut app = App::new(tree, cfg);
     let result = app.run(&mut terminal);
     terminal.show_cursor()?;
     disable_raw_mode()?;
