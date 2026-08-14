@@ -39,7 +39,7 @@ fn main() {
     };
 
     let result: std::io::Result<()> = match cli.mode {
-        Mode::Tui => diretree::tui::run(tree).map_err(|e| std::io::Error::other(format!("{e}"))),
+        Mode::Tui => diretree::tui::run(tree, cfg).map_err(|e| std::io::Error::other(format!("{e}"))),
         Mode::Report => {
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
