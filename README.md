@@ -1,6 +1,8 @@
 # diretree
 
-Interactive disk-usage analyzer. ratatui TUI + plain-text report + JSON.
+Interactive disk-usage analyzer and optimizer. ratatui TUI + plain text report + JSON.
+
+Inspired by WinDirStat and SpaceSniffer. 
 
 ## Install
 
