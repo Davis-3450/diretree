@@ -408,18 +408,12 @@ impl App {
     fn current_node(&self) -> Option<usize> {
         match self.tab {
             Tab::Treemap => self.selected.or(self.hovered).or(Some(self.focus)),
-            Tab::Tree => {
-                let v = self.visible_nodes();
-                v.get(self.tree_cursor).copied()
-            }
-            Tab::Top => {
-                let e = top_entries(&self.tree, 100, 0);
-                e.get(self.top_cursor).copied()
-            }
+            Tab::Tree => self.cached_visible.get(self.tree_cursor).copied(),
+            Tab::Top => self.cached_top.get(self.top_cursor).copied(),
         }
     }
 
-    fn visible_nodes(&self) -> Vec<usize> {
+    fn update_visible_nodes(&mut self) {
         let mut out = Vec::new();
         let mut stack: Vec<usize> = vec![self.tree.root()];
         while let Some(i) = stack.pop() {
@@ -430,7 +424,21 @@ impl App {
                 stack.extend(kids);
             }
         }
-        out
+        self.cached_visible = out;
+        self.dirty_visible = false;
+    }
+
+    fn visible_nodes(&self) -> &[usize] {
+        &self.cached_visible
+    }
+
+    fn update_top_entries(&mut self) {
+        self.cached_top = top_entries(&self.tree, 100, 0);
+        self.dirty_top = false;
+    }
+
+    fn top_entries(&self) -> &[usize] {
+        &self.cached_top
     }
 
     fn depth_of(&self, idx: usize) -> usize {
