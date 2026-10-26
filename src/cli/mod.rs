@@ -43,6 +43,10 @@ pub struct Cli {
     /// Minimum size in bytes to include in report (0 = all)
     #[arg(long, default_value_t = 0)]
     pub min_size: u64,
+
+    /// Color theme (default, catppuccin, monokai, nord, tokyo-night)
+    #[arg(long, value_enum, default_value_t = crate::tui::theme::ThemeChoice::Default)]
+    pub theme: crate::tui::theme::ThemeChoice,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq)]

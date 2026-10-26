@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::cli::report::top_entries;
 use crate::scan::{FileKind, ScanConfig, Tree};
-use crate::tui::theme::Theme;
+use crate::tui::theme::{Theme, ThemeChoice};
 use crate::units::human_bytes;
 
 use super::treemap;
@@ -34,6 +34,8 @@ enum Tab {
 struct App {
     tree: Tree,
     cfg: ScanConfig,
+    theme_choice: ThemeChoice,
+    theme: Theme,
     refresh_error: Option<String>,
     tab: Tab,
     // treemap
@@ -64,13 +66,15 @@ struct App {
 }
 
 impl App {
-    fn new(tree: Tree, cfg: ScanConfig) -> Self {
+    fn new(tree: Tree, cfg: ScanConfig, theme_choice: ThemeChoice) -> Self {
         let mut expanded = HashSet::new();
         expanded.insert(tree.root());
         let top = top_entries(&tree, 100, 0);
         let mut app = Self {
             tree,
             cfg,
+            theme_choice,
+            theme: theme_choice.to_theme(),
             refresh_error: None,
             tab: Tab::Treemap,
             focus: 0,
@@ -109,7 +113,7 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut ratatui::Frame) {
-        let theme = Theme::dark();
+        let theme = self.theme.clone();
         let area = f.area();
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -135,7 +139,11 @@ impl App {
         let back_w = back_text.chars().count() as u16;
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(back_w), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(back_w),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(area);
         self.back_area = cols[0];
         let btn_style = if self.can_back() {
@@ -148,6 +156,12 @@ impl App {
         };
         f.render_widget(Paragraph::new(back_text).style(btn_style), cols[0]);
 
+        // Separator between back button and header content
+        f.render_widget(
+            Paragraph::new(" ").style(Style::default().bg(theme.surface)),
+            cols[1],
+        );
+
         let root = self.tree.node(self.tree.root());
         let mut left = format!(" diretree · {}", root.path.display());
         if let Some(n) = self.current_node() {
@@ -159,7 +173,8 @@ impl App {
             root.file_count,
             root.dir_count
         );
-        let width = cols[1].width as usize;
+        let content_area = cols[2];
+        let width = content_area.width as usize;
         let right_c = right.chars().count();
         let max_left = width.saturating_sub(right_c).saturating_sub(1);
         let left_c: String = left.chars().take(max_left).collect();
@@ -167,7 +182,7 @@ impl App {
 
         let mut spans = vec![Span::styled(left_c, theme.base_style())];
         spans.push(Span::styled(pad + &right, theme.muted_style()));
-        f.render_widget(Paragraph::new(Line::from(spans)), cols[1]);
+        f.render_widget(Paragraph::new(Line::from(spans)), content_area);
     }
 
     fn can_back(&self) -> bool {
@@ -185,11 +200,12 @@ impl App {
 
     fn footer_text(&self) -> String {
         let help = match self.tab {
-            Tab::Treemap => "  ⏎/dbl drill  u up  ←→ select  o open  r refresh  q quit ",
-            Tab::Tree => "  j/k move  l enter  h collapse  o open  r refresh  q quit ",
-            Tab::Top => "  j/k move  ⏎ open  o open  r refresh  q quit ",
+            Tab::Treemap => "  ⏎/dbl drill  u up  ←→ select  t theme  o open  r refresh  q quit ",
+            Tab::Tree => "  j/k move  l/→ enter  h/← collapse  t theme  o open  r refresh  q quit ",
+            Tab::Top => "  j/k move  ⏎ open  t theme  o open  r refresh  q quit ",
         };
-        let mut text = format!(" [1] treemap  [2] tree  [3] top   {help}");
+        let theme_tag = format!("[{}]", self.theme_choice.name());
+        let mut text = format!(" [1] treemap  [2] tree  [3] top  {theme_tag} {help}");
         if let Some(err) = &self.refresh_error {
             text = format!("⚠ refresh failed: {err}");
         }
@@ -244,6 +260,7 @@ impl App {
             self.focus,
             self.selected,
             self.hovered,
+            theme,
         );
 
         // status line: node info
@@ -279,6 +296,9 @@ impl App {
 
     fn draw_tree(&mut self, f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         let root_size = self.tree.node(self.tree.root()).size.max(1);
+        if self.dirty_visible {
+            self.update_visible_nodes();
+        }
         let visible = self.visible_nodes();
         let items: Vec<ListItem> = visible
             .iter()
@@ -548,7 +568,7 @@ impl App {
                     Tab::Top => {
                         if self.top_inner.contains(Position::new(col, row)) {
                             let idx = (row - self.top_inner.y) as usize + self.top_state.offset();
-                            let e = top_entries(&self.tree, 100, 0);
+                            let e = self.top_entries();
                             if idx < e.len() {
                                 self.top_cursor = idx;
                             }
@@ -582,7 +602,7 @@ impl App {
                         self.tree_cursor = next;
                     }
                     Tab::Top => {
-                        let e = top_entries(&self.tree, 100, 0);
+                        let e = self.top_entries();
                         let next = (self.top_cursor as i64 + dir)
                             .clamp(0, e.len().saturating_sub(1) as i64)
                             as usize;
@@ -608,7 +628,28 @@ impl App {
             KeyCode::Char('1') => self.switch(Tab::Treemap),
             KeyCode::Char('2') => self.switch(Tab::Tree),
             KeyCode::Char('3') => self.switch(Tab::Top),
+            KeyCode::Tab => {
+                let next = match self.tab {
+                    Tab::Treemap => Tab::Tree,
+                    Tab::Tree => Tab::Top,
+                    Tab::Top => Tab::Treemap,
+                };
+                self.switch(next)
+            }
+            KeyCode::BackTab => {
+                let prev = match self.tab {
+                    Tab::Treemap => Tab::Top,
+                    Tab::Tree => Tab::Treemap,
+                    Tab::Top => Tab::Tree,
+                };
+                self.switch(prev)
+            }
             KeyCode::Char('o') => self.open_selected(),
+            KeyCode::Char('t') => {
+                self.theme_choice = self.theme_choice.next();
+                self.theme = self.theme_choice.to_theme();
+                Ok(false)
+            }
             KeyCode::Char('r') | KeyCode::F(5) => {
                 self.refresh();
                 Ok(false)
@@ -641,6 +682,10 @@ impl App {
                 self.top_cursor = 0;
                 self.tree_state = ListState::default();
                 self.top_state = ListState::default();
+                self.dirty_visible = true;
+                self.dirty_top = true;
+                self.update_visible_nodes();
+                self.update_top_entries();
             }
             Err(e) => self.refresh_error = Some(e.to_string()),
         }
@@ -656,10 +701,14 @@ impl App {
                 }
             }
             Tab::Tree => {
+                if self.dirty_visible {
+                    self.update_visible_nodes();
+                }
                 let v = self.visible_nodes();
                 if let Some(&idx) = v.get(self.tree_cursor) {
                     if self.expanded.contains(&idx) {
                         self.expanded.remove(&idx);
+                        self.update_visible_nodes();
                     } else if let Some(p) = self.tree.node(idx).parent
                         && let Some(pos) = v.iter().position(|&x| x == p)
                     {
@@ -699,13 +748,13 @@ impl App {
                     self.go_up();
                 }
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Down => {
                 let pos = cur_pos.unwrap_or(0);
                 if !kids.is_empty() {
                     self.selected = Some(kids[(pos + 1) % kids.len()]);
                 }
             }
-            KeyCode::Left => {
+            KeyCode::Left | KeyCode::Up => {
                 let pos = cur_pos.unwrap_or(0);
                 if !kids.is_empty() {
                     self.selected = Some(kids[(pos + kids.len() - 1) % kids.len()]);
@@ -717,10 +766,14 @@ impl App {
     }
 
     fn tree_key(&mut self, k: KeyCode) -> io::Result<bool> {
+        if self.dirty_visible {
+            self.update_visible_nodes();
+        }
         let visible = self.visible_nodes();
         if visible.is_empty() {
             return Ok(false);
         }
+        let page_size = 15;
         match k {
             KeyCode::Down | KeyCode::Char('j') if self.tree_cursor + 1 < visible.len() => {
                 self.tree_cursor += 1;
@@ -728,18 +781,32 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.tree_cursor = self.tree_cursor.saturating_sub(1);
             }
-            KeyCode::Enter | KeyCode::Char('l') => {
+            KeyCode::PageDown => {
+                self.tree_cursor = (self.tree_cursor + page_size).min(visible.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                self.tree_cursor = self.tree_cursor.saturating_sub(page_size);
+            }
+            KeyCode::Home => {
+                self.tree_cursor = 0;
+            }
+            KeyCode::End => {
+                self.tree_cursor = visible.len().saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => {
                 let idx = visible[self.tree_cursor];
                 if self.tree.node(idx).kind == FileKind::Dir {
                     self.expanded.insert(idx);
+                    self.update_visible_nodes();
                 }
             }
-            KeyCode::Char('h') => {
+            KeyCode::Left | KeyCode::Char('h') => {
                 let idx = visible[self.tree_cursor];
                 if self.expanded.contains(&idx) {
                     self.expanded.remove(&idx);
+                    self.update_visible_nodes();
                 } else if let Some(p) = self.tree.node(idx).parent
-                    && let Some(pos) = visible.iter().position(|&v| v == p)
+                    && let Some(pos) = self.visible_nodes().iter().position(|&v| v == p)
                 {
                     self.tree_cursor = pos;
                 }
@@ -750,13 +817,29 @@ impl App {
     }
 
     fn top_key(&mut self, k: KeyCode) -> io::Result<bool> {
-        let entries = top_entries(&self.tree, 100, 0);
+        if self.dirty_top {
+            self.update_top_entries();
+        }
+        let entries = &self.cached_top;
+        let page_size = 15;
         match k {
             KeyCode::Down | KeyCode::Char('j') if self.top_cursor + 1 < entries.len() => {
                 self.top_cursor += 1;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.top_cursor = self.top_cursor.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.top_cursor = (self.top_cursor + page_size).min(entries.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                self.top_cursor = self.top_cursor.saturating_sub(page_size);
+            }
+            KeyCode::Home => {
+                self.top_cursor = 0;
+            }
+            KeyCode::End => {
+                self.top_cursor = entries.len().saturating_sub(1);
             }
             KeyCode::Enter if self.top_cursor < entries.len() => {
                 let _ = open::that(self.tree.node(entries[self.top_cursor]).path.clone());
@@ -775,14 +858,14 @@ impl App {
     }
 }
 
-pub fn run(tree: Tree, cfg: ScanConfig) -> Result<(), Box<dyn Error>> {
+pub fn run(tree: Tree, cfg: ScanConfig, theme_choice: ThemeChoice) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(tree, cfg);
+    let mut app = App::new(tree, cfg, theme_choice);
     let result = app.run(&mut terminal);
     terminal.show_cursor()?;
     disable_raw_mode()?;

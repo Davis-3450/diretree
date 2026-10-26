@@ -10,6 +10,12 @@ fn main() {
         max_depth: cli.max_depth,
         ignore_dirs: !cli.no_ignore,
     };
+    let is_interactive = cli.mode == Mode::Tui;
+    if is_interactive {
+        eprint!("Scanning {}... ", cli.path.display());
+        let _ = std::io::stderr().flush();
+    }
+
     let scanned = if cli.no_cache {
         scan_tree(&cli.path, cfg)
     } else if let Some(t) = diretree::scan::cache::load(
@@ -30,6 +36,12 @@ fn main() {
             );
         })
     };
+
+    if is_interactive {
+        // Clear the scanning message line before entering ratatui alternate screen
+        eprint!("\r\x1B[2K");
+        let _ = std::io::stderr().flush();
+    }
     let tree = match scanned {
         Ok(t) => t,
         Err(e) => {
@@ -39,7 +51,7 @@ fn main() {
     };
 
     let result: std::io::Result<()> = match cli.mode {
-        Mode::Tui => diretree::tui::run(tree, cfg).map_err(|e| std::io::Error::other(format!("{e}"))),
+        Mode::Tui => diretree::tui::run(tree, cfg, cli.theme).map_err(|e| std::io::Error::other(format!("{e}"))),
         Mode::Report => {
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();

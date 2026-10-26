@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use squarify::{Rect, squarify};
 
 use crate::scan::Tree;
-use crate::tui::theme::{Theme, tile_color, tile_label_fg};
+use crate::tui::theme::{Theme, tile_color_with_theme, tile_label_fg};
 use crate::units::human_bytes;
 
 /// Render a treemap of `focus`'s children into the buffer. `selected` child
@@ -20,6 +20,7 @@ pub fn render_treemap(
     focus: usize,
     selected: Option<usize>,
     hovered: Option<usize>,
+    theme: &Theme,
 ) {
     let w = area.width as i64;
     let h = area.height as i64;
@@ -39,9 +40,9 @@ pub fn render_treemap(
         let (x, y, ww, hh) = (p.rect.x, p.rect.y, p.rect.w, p.rect.h);
         let n = tree.node(p.idx);
         let pct = n.size as f64 / total as f64;
-        let mut color = tile_color(&n.name, n.kind, pct);
+        let mut color = tile_color_with_theme(&n.name, n.kind, pct, theme);
         if Some(p.idx) == hovered {
-            color = Theme::dark().accent2;
+            color = theme.accent2;
         }
         for dy in 0..hh {
             for dx in 0..ww {
@@ -67,9 +68,9 @@ pub fn render_treemap(
                 let cut: String = label.chars().take(max_chars.saturating_sub(1)).collect();
                 label = format!("{cut}…");
             }
-            let color = tile_color(&n.name, n.kind, pct);
+            let color = tile_color_with_theme(&n.name, n.kind, pct, theme);
             let bg = if Some(p.idx) == hovered {
-                Theme::dark().accent2
+                theme.accent2
             } else {
                 color
             };
@@ -89,13 +90,13 @@ pub fn render_treemap(
 
     // selected tile border
     if let Some(p) = selected.and_then(|sel| placed.iter().find(|p| p.idx == sel)) {
-        draw_border(buf, area, p.rect, Theme::dark().accent);
+        draw_border(buf, area, p.rect, theme.accent);
     }
     // hovered tile border (teal), only when not already selected
     if let Some(hv) = hovered.filter(|hv| Some(*hv) != selected)
         && let Some(p) = placed.iter().find(|q| q.idx == hv)
     {
-        draw_border(buf, area, p.rect, Theme::dark().accent2);
+        draw_border(buf, area, p.rect, theme.accent2);
     }
 }
 
