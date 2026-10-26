@@ -350,7 +350,10 @@ impl App {
 
     fn draw_top(&mut self, f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         let root_size = self.tree.node(self.tree.root()).size.max(1);
-        let entries = top_entries(&self.tree, 100, 0);
+        if self.dirty_top {
+            self.update_top_entries();
+        }
+        let entries = &self.cached_top;
         let items: Vec<ListItem> = entries
             .iter()
             .enumerate()
@@ -371,10 +374,13 @@ impl App {
                     format!("{label:<4} "),
                     Style::default().fg(color),
                 ));
+                let bar_str = "█".repeat(bar_len);
+                let bar_pad = " ".repeat(20usize.saturating_sub(bar_len));
                 spans.push(Span::styled(
-                    "█".repeat(bar_len),
+                    bar_str,
                     Style::default().fg(color),
                 ));
+                spans.push(Span::raw(bar_pad));
                 spans.push(Span::styled(
                     format!(" {:>9}  {:>5.1}%  ", human_bytes(n.size), pct * 100.0),
                     theme.muted_style(),
