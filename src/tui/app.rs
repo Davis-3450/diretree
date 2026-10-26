@@ -56,13 +56,19 @@ struct App {
     top_state: ListState,
     // double-click tracking
     last_click: Option<(u16, u16, Instant)>,
+    // caching / memoization
+    cached_visible: Vec<usize>,
+    dirty_visible: bool,
+    cached_top: Vec<usize>,
+    dirty_top: bool,
 }
 
 impl App {
     fn new(tree: Tree, cfg: ScanConfig) -> Self {
         let mut expanded = HashSet::new();
         expanded.insert(tree.root());
-        Self {
+        let top = top_entries(&tree, 100, 0);
+        let mut app = Self {
             tree,
             cfg,
             refresh_error: None,
@@ -81,7 +87,13 @@ impl App {
             tree_state: ListState::default(),
             top_state: ListState::default(),
             last_click: None,
-        }
+            cached_visible: Vec::new(),
+            dirty_visible: true,
+            cached_top: top,
+            dirty_top: false,
+        };
+        app.update_visible_nodes();
+        app
     }
 
     fn run(
