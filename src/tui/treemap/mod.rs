@@ -122,23 +122,57 @@ pub fn hit_test(tree: &Tree, focus: usize, area: TRect, col: i64, row: i64) -> O
 fn draw_border(buf: &mut Buffer, area: TRect, r: Rect, color: Color) {
     let (x0, y0) = (area.x + r.x as u16, area.y + r.y as u16);
     let (x1, y1) = (x0 + r.w as u16 - 1, y0 + r.h as u16 - 1);
+
+    // If tile is only 1 row high, adjust background color gently without reversing text cells
+    if r.h <= 1 {
+        for x in x0..=x1 {
+            if let Some(c) = buf.cell_mut((x, y0)) {
+                c.set_bg(color);
+                c.set_fg(tile_label_fg(color));
+            }
+        }
+        return;
+    }
+
     let style = Style::default()
         .bg(color)
         .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+
     for x in x0..=x1 {
         if let Some(c) = buf.cell_mut((x, y0)) {
-            c.set_style(style);
+            // preserve text char if already written
+            if c.symbol() == " " {
+                c.set_style(style);
+            } else {
+                c.set_bg(color);
+                c.set_fg(tile_label_fg(color));
+            }
         }
         if let Some(c) = buf.cell_mut((x, y1)) {
-            c.set_style(style);
+            if c.symbol() == " " {
+                c.set_style(style);
+            } else {
+                c.set_bg(color);
+                c.set_fg(tile_label_fg(color));
+            }
         }
     }
     for y in y0..=y1 {
         if let Some(c) = buf.cell_mut((x0, y)) {
-            c.set_style(style);
+            if c.symbol() == " " {
+                c.set_style(style);
+            } else {
+                c.set_bg(color);
+                c.set_fg(tile_label_fg(color));
+            }
         }
         if let Some(c) = buf.cell_mut((x1, y)) {
-            c.set_style(style);
+            if c.symbol() == " " {
+                c.set_style(style);
+            } else {
+                c.set_bg(color);
+                c.set_fg(tile_label_fg(color));
+            }
         }
     }
 }
