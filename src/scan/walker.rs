@@ -72,19 +72,19 @@ pub fn scan_tree(path: &Path, cfg: ScanConfig) -> Result<Tree, ScanError> {
         children: Vec::new(),
     });
     let root_path = path.to_path_buf();
-    let mut tree = Tree::new_root(root.name.clone(), root_path);
+    let mut tree = Tree::new_root(root.name, root_path);
     let root_idx = tree.root();
-    append_children(&mut tree, root_idx, &root.children);
+    append_children(&mut tree, root_idx, root.children);
     tree.node_mut(tree.root()).size = root.size;
     tree.compute_sizes();
     Ok(tree)
 }
 
-fn append_children(tree: &mut Tree, parent: usize, children: &[REntry]) {
+fn append_children(tree: &mut Tree, parent: usize, children: Vec<REntry>) {
     for c in children {
-        let idx = tree.add_child(parent, c.name.clone(), c.kind, c.path.clone());
+        let idx = tree.add_child(parent, c.name, c.kind, c.path);
         tree.node_mut(idx).size = c.size;
-        append_children(tree, idx, &c.children);
+        append_children(tree, idx, c.children);
     }
 }
 
@@ -94,11 +94,14 @@ impl Walker {
         if depth >= self.cfg.max_depth {
             return self.leaf_dir(path);
         }
-        // cycle detection via canonical real path (catches junctions/symlink loops)
-        if let Ok(canon) = path.canonicalize()
-            && !self.visited.lock().unwrap().insert(canon)
-        {
-            return self.leaf_dir(path);
+
+        // cycle detection via canonical real path: ONLY required when follow_symlinks is enabled
+        if self.cfg.follow_symlinks {
+            if let Ok(canon) = path.canonicalize()
+                && !self.visited.lock().unwrap().insert(canon)
+            {
+                return self.leaf_dir(path);
+            }
         }
 
         let rd = match std::fs::read_dir(path) {
@@ -106,17 +109,95 @@ impl Walker {
             Err(_) => return Err(ScanError::Unreadable(path.to_path_buf())),
         };
 
-        let entries: Vec<_> = rd.flatten().collect();
-        let results: Vec<REntry> = entries
-            .par_iter()
-            .map(|e| {
-                self.scan_entry(
-                    &e.path(),
-                    e.file_name().to_string_lossy().into_owned(),
-                    depth,
-                )
+        // Partition entries into direct files/symlinks and subdirectories
+        let mut subdirs = Vec::new();
+        let mut files = Vec::new();
+
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                if self.cfg.ignore_dirs && is_ignored(&name) {
+                    files.push(REntry {
+                        name,
+                        kind: FileKind::Dir,
+                        path: entry.path(),
+                        size: 0,
+                        children: vec![],
+                    });
+                } else {
+                    subdirs.push((entry.path(), name));
+                }
+            } else if file_type.is_symlink() {
+                let follow = self.cfg.follow_symlinks
+                    && depth < self.cfg.max_depth
+                    && !(self.cfg.ignore_dirs && is_ignored(&name));
+
+                if follow && let Ok(rmd) = std::fs::metadata(&entry.path()) {
+                    if rmd.is_dir() {
+                        subdirs.push((entry.path(), name));
+                    } else if rmd.is_file() {
+                        files.push(REntry {
+                            name,
+                            kind: FileKind::File,
+                            path: entry.path(),
+                            size: rmd.len(),
+                            children: vec![],
+                        });
+                    } else {
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        files.push(REntry {
+                            name,
+                            kind: FileKind::Symlink,
+                            path: entry.path(),
+                            size: len,
+                            children: vec![],
+                        });
+                    }
+                } else {
+                    // Use entry.metadata() directly avoiding redundant syscall on Windows/Unix
+                    let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    files.push(REntry {
+                        name,
+                        kind: FileKind::Symlink,
+                        path: entry.path(),
+                        size: len,
+                        children: vec![],
+                    });
+                }
+            } else {
+                // Regular file: entry.metadata() reuses OS cached attributes without second syscall
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                files.push(REntry {
+                    name,
+                    kind: FileKind::File,
+                    path: entry.path(),
+                    size: len,
+                    children: vec![],
+                });
+            }
+        }
+
+        // Subdirectories recurse in parallel using Rayon divide-and-conquer
+        let mut subdir_results: Vec<REntry> = subdirs
+            .into_par_iter()
+            .map(|(sub_path, sub_name)| {
+                self.scan_dir(&sub_path, depth + 1).unwrap_or_else(|_| REntry {
+                    name: sub_name,
+                    kind: FileKind::Dir,
+                    path: sub_path,
+                    size: 0,
+                    children: vec![],
+                })
             })
             .collect();
+
+        // Combine files and directories
+        files.append(&mut subdir_results);
 
         Ok(REntry {
             name: path
@@ -126,7 +207,7 @@ impl Walker {
             kind: FileKind::Dir,
             path: path.to_path_buf(),
             size: 0,
-            children: results,
+            children: files,
         })
     }
 
@@ -141,78 +222,5 @@ impl Walker {
             size: 0,
             children: vec![],
         })
-    }
-
-    fn scan_entry(&self, path: &Path, name: String, depth: u32) -> REntry {
-        // symlink_metadata does not follow the link
-        let md = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(_) => {
-                return REntry {
-                    name,
-                    kind: FileKind::File,
-                    path: path.to_path_buf(),
-                    size: 0,
-                    children: vec![],
-                };
-            }
-        };
-
-        if md.file_type().is_symlink() {
-            let follow = self.cfg.follow_symlinks
-                && depth < self.cfg.max_depth
-                && !(self.cfg.ignore_dirs && is_ignored(&name));
-            if follow && let Ok(rmd) = std::fs::metadata(path) {
-                if rmd.is_dir()
-                    && let Ok(sub) = self.scan_dir(path, depth + 1)
-                {
-                    return sub;
-                } else if rmd.is_file() {
-                    return REntry {
-                        name,
-                        kind: FileKind::File,
-                        path: path.to_path_buf(),
-                        size: rmd.len(),
-                        children: vec![],
-                    };
-                }
-            }
-            // don't follow / not a file: record as symlink with its own len
-            return REntry {
-                name,
-                kind: FileKind::Symlink,
-                path: path.to_path_buf(),
-                size: md.len(),
-                children: vec![],
-            };
-        }
-
-        if md.is_dir() {
-            if self.cfg.ignore_dirs && is_ignored(&name) {
-                // keep the node visible but do not recurse
-                return REntry {
-                    name,
-                    kind: FileKind::Dir,
-                    path: path.to_path_buf(),
-                    size: 0,
-                    children: vec![],
-                };
-            }
-            return self.scan_dir(path, depth + 1).unwrap_or_else(|_| REntry {
-                name,
-                kind: FileKind::Dir,
-                path: path.to_path_buf(),
-                size: 0,
-                children: vec![],
-            });
-        }
-
-        REntry {
-            name,
-            kind: FileKind::File,
-            path: path.to_path_buf(),
-            size: md.len(),
-            children: vec![],
-        }
     }
 }
